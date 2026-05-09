@@ -115,71 +115,164 @@ export function installOverlay(hooks: BootstrapHooks): {
   };
 }
 
+function withTimeout<T>(
+  label: string,
+  promise: Promise<T>,
+  ms: number,
+): Promise<T> {
+  let timeoutId: ReturnType<typeof setTimeout>;
+  const timeout = new Promise<T>((_, reject) => {
+    timeoutId = setTimeout(
+      () => reject(new Error(`${label} timed out after ${ms}ms`)),
+      ms,
+    );
+  });
+  return Promise.race([
+    promise.finally(() => clearTimeout(timeoutId)),
+    timeout,
+  ]);
+}
+
 export async function diagnoseCameras(
   log: (msg: string) => void,
 ): Promise<DiagnosticResult> {
   const out: DiagnosticResult = { streams: [], videoDevices: [], log: '' };
   log('=== camera diagnostic ===');
 
-  let pre = await navigator.mediaDevices.enumerateDevices();
-  let preVideo = pre.filter((d) => d.kind === 'videoinput');
-  log(`(no perm) ${preVideo.length} videoinput(s):`);
-  preVideo.forEach((d, i) =>
-    log(
-      `  ${i}: label="${d.label || '(empty)'}", id=${d.deviceId.slice(0, 16)}…`,
-    ),
-  );
-
-  log('calling getUserMedia({video:true}) …');
-  let mainStream: MediaStream;
-  try {
-    mainStream = await navigator.mediaDevices.getUserMedia({ video: true });
-  } catch (err: any) {
-    log('getUserMedia rejected: ' + (err?.message || err));
+  log(`secureContext=${window.isSecureContext} userAgent=${navigator.userAgent}`);
+  log(`navigator.mediaDevices=${typeof navigator.mediaDevices}`);
+  if (!navigator.mediaDevices) {
+    log('FATAL: navigator.mediaDevices is missing on this browser.');
     return out;
   }
-  out.streams.push(mainStream);
-  const mainTrack = mainStream.getVideoTracks()[0];
-  if (mainTrack) {
-    const s = mainTrack.getSettings();
-    log(
-      `got primary track: label="${mainTrack.label}", ${s.width}x${s.height} @ ${s.frameRate ?? '?'}fps, deviceId=${(s.deviceId || '').slice(0, 16)}…`,
-    );
-  }
+  log(`getUserMedia=${typeof navigator.mediaDevices.getUserMedia}`);
+  log(`enumerateDevices=${typeof navigator.mediaDevices.enumerateDevices}`);
 
-  const post = await navigator.mediaDevices.enumerateDevices();
-  out.videoDevices = post.filter((d) => d.kind === 'videoinput');
-  log(`(with perm) ${out.videoDevices.length} videoinput(s):`);
-  out.videoDevices.forEach((d, i) =>
-    log(
-      `  ${i}: label="${d.label || '(empty)'}", id=${d.deviceId.slice(0, 16)}…`,
-    ),
-  );
-
-  // If there's more than one camera, try to open the second one too (right
-  // eye). Skip the one already streaming.
-  const primaryId = mainTrack?.getSettings().deviceId;
-  const otherDevices = out.videoDevices.filter((d) => d.deviceId !== primaryId);
-  for (const dev of otherDevices) {
-    log(`trying secondary camera "${dev.label || dev.deviceId.slice(0, 8)}" …`);
+  // Check the Permissions API state, if available — gives us a hint without
+  // making an actual getUserMedia call.
+  if (navigator.permissions?.query) {
     try {
-      const s = await navigator.mediaDevices.getUserMedia({
-        video: { deviceId: { exact: dev.deviceId } },
-      });
-      out.streams.push(s);
-      const t = s.getVideoTracks()[0];
-      if (t) {
-        const set = t.getSettings();
-        log(
-          `  ok: ${set.width}x${set.height} @ ${set.frameRate ?? '?'}fps`,
-        );
-      }
-      break; // one secondary is enough
+      const perm = await withTimeout(
+        'permissions.query',
+        navigator.permissions.query({ name: 'camera' as PermissionName }),
+        3000,
+      );
+      log(`permissions.camera = ${perm.state}`);
     } catch (err: any) {
-      log('  failed: ' + (err?.message || err));
+      log('permissions.query: ' + (err?.message || err));
     }
   }
 
+  log('enumerateDevices (no perm) …');
+  try {
+    const pre = await withTimeout(
+      'enumerateDevices',
+      navigator.mediaDevices.enumerateDevices(),
+      5000,
+    );
+    const preVideo = pre.filter((d) => d.kind === 'videoinput');
+    log(`  ${preVideo.length} videoinput(s):`);
+    preVideo.forEach((d, i) =>
+      log(
+        `    ${i}: kind=${d.kind} label="${d.label || '(empty)'}" id=${d.deviceId.slice(0, 16)}…`,
+      ),
+    );
+  } catch (err: any) {
+    log('enumerateDevices threw: ' + (err?.message || err));
+    log('— moving on to getUserMedia anyway —');
+  }
+
+  log('calling getUserMedia({video:true}) …');
+  let mainStream: MediaStream | null = null;
+  try {
+    mainStream = await withTimeout(
+      'getUserMedia',
+      navigator.mediaDevices.getUserMedia({ video: true }),
+      15000,
+    );
+  } catch (err: any) {
+    log('getUserMedia rejected: ' + (err?.name || '') + ' ' + (err?.message || err));
+  }
+
+  if (mainStream) {
+    out.streams.push(mainStream);
+    const mainTrack = mainStream.getVideoTracks()[0];
+    if (mainTrack) {
+      const s = mainTrack.getSettings();
+      log(
+        `primary track: label="${mainTrack.label}" ${s.width}x${s.height} @ ${s.frameRate ?? '?'}fps id=${(s.deviceId || '').slice(0, 16)}…`,
+      );
+    }
+
+    log('enumerateDevices (with perm) …');
+    try {
+      const post = await withTimeout(
+        'enumerateDevices2',
+        navigator.mediaDevices.enumerateDevices(),
+        5000,
+      );
+      out.videoDevices = post.filter((d) => d.kind === 'videoinput');
+      log(`  ${out.videoDevices.length} videoinput(s):`);
+      out.videoDevices.forEach((d, i) =>
+        log(
+          `    ${i}: label="${d.label || '(empty)'}" id=${d.deviceId.slice(0, 16)}…`,
+        ),
+      );
+    } catch (err: any) {
+      log('enumerateDevices2 threw: ' + (err?.message || err));
+    }
+
+    const primaryId = mainTrack?.getSettings().deviceId;
+    const otherDevices = out.videoDevices.filter(
+      (d) => d.deviceId !== primaryId,
+    );
+    for (const dev of otherDevices) {
+      log(`trying secondary "${dev.label || dev.deviceId.slice(0, 8)}" …`);
+      try {
+        const s = await withTimeout(
+          'getUserMedia#2',
+          navigator.mediaDevices.getUserMedia({
+            video: { deviceId: { exact: dev.deviceId } },
+          }),
+          10000,
+        );
+        out.streams.push(s);
+        const t = s.getVideoTracks()[0];
+        if (t) {
+          const set = t.getSettings();
+          log(`  ok: ${set.width}x${set.height} @ ${set.frameRate ?? '?'}fps`);
+        }
+        break;
+      } catch (err: any) {
+        log('  failed: ' + (err?.name || '') + ' ' + (err?.message || err));
+      }
+    }
+  }
+
+  // Try alternative constraints if first call gave nothing.
+  if (out.streams.length === 0) {
+    for (const facingMode of ['environment', 'user']) {
+      log(`fallback: getUserMedia({video:{facingMode:'${facingMode}'}}) …`);
+      try {
+        const s = await withTimeout(
+          'getUserMedia-' + facingMode,
+          navigator.mediaDevices.getUserMedia({ video: { facingMode } }),
+          10000,
+        );
+        out.streams.push(s);
+        const t = s.getVideoTracks()[0];
+        if (t) {
+          const set = t.getSettings();
+          log(`  ok: label="${t.label}" ${set.width}x${set.height}`);
+        }
+        break;
+      } catch (err: any) {
+        log('  failed: ' + (err?.name || '') + ' ' + (err?.message || err));
+      }
+    }
+  }
+
+  log(`=== diagnostic done — got ${out.streams.length} stream(s) ===`);
   return out;
 }
 
