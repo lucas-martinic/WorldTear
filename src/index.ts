@@ -1,12 +1,12 @@
 import { CameraFacing, CameraSource, SessionMode, World } from '@iwsdk/core';
-import { bindStereoEyeSwitching, createCape } from './cape.js';
+import { bindStereoEyeSwitching, Cape, createCape } from './cape.js';
 import {
   CameraSourceBindSystem,
   pickStereoCameras,
 } from './camera-source-system.js';
 import { ClothSystem, makeFingertipSource } from './cloth-system.js';
 import { RawCameraSystem } from './raw-camera-system.js';
-import { createStatusLight } from './status-light.js';
+import { createStatusLight, StatusLight } from './status-light.js';
 import { offerSessionWithCameraAccess } from './xr-session.js';
 
 World.create(document.getElementById('scene-container') as HTMLDivElement, {
@@ -61,12 +61,35 @@ World.create(document.getElementById('scene-container') as HTMLDivElement, {
 
   status.set('await-xr');
   await offerSessionWithCameraAccess(world);
-
-  // Wait until we're actually inside the XR session before asking for cameras.
-  // On Quest browser the passthrough cameras may only enumerate inside an
-  // active immersive session.
   await waitForSession(world);
+  if (!world.session) {
+    status.set('error');
+    return;
+  }
 
+  // Defer the camera permission request until the user does a `select`
+  // gesture inside the session. Quest browser appears to silently hang
+  // getUserMedia inside an immersive session unless triggered from a
+  // transient-activation (pinch / controller trigger).
+  status.set('await-gesture');
+
+  const session = world.session;
+  let triggered = false;
+  const handleSelect = async () => {
+    if (triggered) return;
+    triggered = true;
+    session.removeEventListener('select', handleSelect);
+    await requestCameras(world, cape, cameraBind, status);
+  };
+  session.addEventListener('select', handleSelect);
+});
+
+async function requestCameras(
+  world: World,
+  cape: Cape,
+  cameraBind: CameraSourceBindSystem | undefined,
+  status: StatusLight,
+) {
   status.set('enumerating');
   try {
     const pairing = await pickStereoCameras();
@@ -75,9 +98,7 @@ World.create(document.getElementById('scene-container') as HTMLDivElement, {
       return;
     }
 
-    if (cameraBind) {
-      cameraBind.attach(cape, pairing);
-    }
+    if (cameraBind) cameraBind.attach(cape, pairing);
 
     world.createEntity().addComponent(CameraSource, {
       deviceId: pairing.left,
@@ -102,7 +123,7 @@ World.create(document.getElementById('scene-container') as HTMLDivElement, {
     console.warn('[WorldTear] camera setup failed:', err);
     status.set('error');
   }
-});
+}
 
 function waitForSession(world: World): Promise<void> {
   return new Promise((resolve) => {

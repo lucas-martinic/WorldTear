@@ -7,18 +7,20 @@ import {
 } from 'three';
 
 export type StatusCode =
-  | 'init'           // black — code reached but nothing happened yet
-  | 'await-xr'       // dim blue — waiting for AR session to start
-  | 'enumerating'    // bright blue — calling enumerateDevices
-  | 'no-cameras'     // red — 0 cameras returned (denied or unsupported)
-  | 'requested'      // yellow — CameraSource entities created, waiting for Active
-  | 'active'         // green — at least one camera streaming, texture should show
-  | 'rawcam'         // cyan — W3C camera-access reports view.camera and bound texture
-  | 'error';         // magenta — unexpected exception
+  | 'init'             // black — code reached but nothing happened yet
+  | 'await-xr'         // dim blue — waiting for AR session to start
+  | 'await-gesture'    // orange — pinch / pull controller trigger to grant camera
+  | 'enumerating'      // bright blue — calling enumerateDevices
+  | 'no-cameras'       // red — 0 cameras returned (denied or unsupported)
+  | 'requested'        // yellow — CameraSource entities created, waiting for Active
+  | 'active'           // green — at least one camera streaming, texture should show
+  | 'rawcam'           // cyan — W3C camera-access bound a texture
+  | 'error';           // magenta — unexpected exception
 
 const COLORS: Record<StatusCode, number> = {
   init: 0x111111,
   'await-xr': 0x103060,
+  'await-gesture': 0xf07a18,
   enumerating: 0x1f8af2,
   'no-cameras': 0xc0341d,
   requested: 0xc0a01d,
