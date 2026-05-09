@@ -1,12 +1,14 @@
-import { CameraFacing, CameraSource, SessionMode, World } from '@iwsdk/core';
-import { bindStereoEyeSwitching, Cape, createCape } from './cape.js';
+import { SessionMode, World } from '@iwsdk/core';
+import { LinearFilter, VideoTexture } from 'three';
 import {
-  CameraSourceBindSystem,
-  pickStereoCameras,
-} from './camera-source-system.js';
+  diagnoseCameras,
+  installOverlay,
+  streamToVideo,
+} from './bootstrap-overlay.js';
+import { bindStereoEyeSwitching, Cape, createCape, setCameraTexture } from './cape.js';
 import { ClothSystem, makeFingertipSource } from './cloth-system.js';
 import { RawCameraSystem } from './raw-camera-system.js';
-import { createStatusLight, StatusLight } from './status-light.js';
+import { createStatusLight } from './status-light.js';
 import { offerSessionWithCameraAccess } from './xr-session.js';
 
 World.create(document.getElementById('scene-container') as HTMLDivElement, {
@@ -16,7 +18,7 @@ World.create(document.getElementById('scene-container') as HTMLDivElement, {
     features: { handTracking: true },
   },
   features: {
-    camera: true,
+    camera: false,
   },
   render: {
     near: 0.01,
@@ -51,90 +53,63 @@ World.create(document.getElementById('scene-container') as HTMLDivElement, {
     ]);
   }
 
-  const cameraBind = world
-    .registerSystem(CameraSourceBindSystem)
-    .getSystem(CameraSourceBindSystem);
-  if (cameraBind) {
-    cameraBind.attach(cape, { left: '', right: '' });
-    cameraBind.onBound = () => status.set('active');
-  }
+  const overlay = installOverlay({
+    onClick: async () => {
+      const result = await diagnoseCameras(overlay.log);
+      bindStreamsToCape(cape, result.streams, overlay.log);
 
-  status.set('await-xr');
-  await offerSessionWithCameraAccess(world);
-  await waitForSession(world);
-  if (!world.session) {
-    status.set('error');
+      overlay.log('offering AR session…');
+      status.set('await-xr');
+      await offerSessionWithCameraAccess(world);
+      // The session offer button is shown to the user; they tap it. After
+      // setSession resolves, world.session is set.
+      overlay.log('session offered — accept the prompt to enter AR.');
+
+      // Hide the overlay only once the session actually starts so the user
+      // can keep watching the log if something stalls.
+      const handle = setInterval(() => {
+        if (world.session) {
+          clearInterval(handle);
+          status.set(result.streams.length > 0 ? 'active' : 'no-cameras');
+          overlay.remove();
+        }
+      }, 200);
+    },
+  });
+});
+
+function bindStreamsToCape(
+  cape: Cape,
+  streams: MediaStream[],
+  log: (msg: string) => void,
+) {
+  if (streams.length === 0) {
+    log('no streams to bind — cape will stay purple.');
     return;
   }
 
-  // Defer the camera permission request until the user does a `select`
-  // gesture inside the session. Quest browser appears to silently hang
-  // getUserMedia inside an immersive session unless triggered from a
-  // transient-activation (pinch / controller trigger).
-  status.set('await-gesture');
+  const leftVideo = streamToVideo(streams[0]);
+  leftVideo.play().catch((err) => log('left video.play() failed: ' + err.message));
+  const leftTex = makeVideoTexture(leftVideo);
+  setCameraTexture(cape, 'left', leftTex);
 
-  const session = world.session;
-  let triggered = false;
-  const handleSelect = async () => {
-    if (triggered) return;
-    triggered = true;
-    session.removeEventListener('select', handleSelect);
-    await requestCameras(world, cape, cameraBind, status);
-  };
-  session.addEventListener('select', handleSelect);
-});
-
-async function requestCameras(
-  world: World,
-  cape: Cape,
-  cameraBind: CameraSourceBindSystem | undefined,
-  status: StatusLight,
-) {
-  status.set('enumerating');
-  try {
-    const pairing = await pickStereoCameras();
-    if (!pairing) {
-      status.set('no-cameras');
-      return;
-    }
-
-    if (cameraBind) cameraBind.attach(cape, pairing);
-
-    world.createEntity().addComponent(CameraSource, {
-      deviceId: pairing.left,
-      facing: CameraFacing.Back,
-      width: 1280,
-      height: 720,
-      frameRate: 30,
-    });
-
-    if (pairing.right !== pairing.left) {
-      world.createEntity().addComponent(CameraSource, {
-        deviceId: pairing.right,
-        facing: CameraFacing.Back,
-        width: 1280,
-        height: 720,
-        frameRate: 30,
-      });
-    }
-
-    status.set('requested');
-  } catch (err) {
-    console.warn('[WorldTear] camera setup failed:', err);
-    status.set('error');
+  if (streams.length > 1) {
+    const rightVideo = streamToVideo(streams[1]);
+    rightVideo
+      .play()
+      .catch((err) => log('right video.play() failed: ' + err.message));
+    const rightTex = makeVideoTexture(rightVideo);
+    setCameraTexture(cape, 'right', rightTex);
+    log('bound stream 0 -> left eye, stream 1 -> right eye');
+  } else {
+    setCameraTexture(cape, 'right', leftTex);
+    log('only one stream available — using same texture in both eyes');
   }
 }
 
-function waitForSession(world: World): Promise<void> {
-  return new Promise((resolve) => {
-    if (world.session) {
-      resolve();
-      return;
-    }
-    const tick = () => {
-      if (world.session) resolve();
-      else setTimeout(tick, 100);
-    };
-    tick();
-  });
+function makeVideoTexture(video: HTMLVideoElement): VideoTexture {
+  const tex = new VideoTexture(video);
+  tex.minFilter = LinearFilter;
+  tex.magFilter = LinearFilter;
+  return tex;
 }
