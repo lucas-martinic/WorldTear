@@ -55,25 +55,36 @@ World.create(document.getElementById('scene-container') as HTMLDivElement, {
 
   const overlay = installOverlay({
     onClick: async () => {
+      // PHASE 1 — Enter XR while user activation is fresh. requestSession
+      // requires it; awaiting other promises first would consume it.
+      status.set('await-xr');
+      overlay.log('requesting AR session …');
+      await offerSessionWithCameraAccess(world, overlay.log);
+
+      if (!world.session) {
+        overlay.log('XR session never started — keeping overlay up.');
+        status.set('error');
+        return;
+      }
+
+      // PHASE 2 — Diagnostic. Now that we're inside an XR session, Quest may
+      // be willing to expose passthrough cameras through getUserMedia.
       const result = await diagnoseCameras(overlay.log);
       bindStreamsToCape(cape, result.streams, overlay.log);
 
-      overlay.log('offering AR session…');
-      status.set('await-xr');
-      await offerSessionWithCameraAccess(world);
-      // The session offer button is shown to the user; they tap it. After
-      // setSession resolves, world.session is set.
-      overlay.log('session offered — accept the prompt to enter AR.');
+      if (result.streams.length > 0) {
+        status.set('active');
+      } else {
+        // RawCameraSystem may still bind via W3C camera-access.
+        // If view.camera is undefined, status will stay where it was.
+        overlay.log(
+          'no getUserMedia streams. RawCameraSystem will bind the cape if Quest exposes view.camera.',
+        );
+      }
 
-      // Hide the overlay only once the session actually starts so the user
-      // can keep watching the log if something stalls.
-      const handle = setInterval(() => {
-        if (world.session) {
-          clearInterval(handle);
-          status.set(result.streams.length > 0 ? 'active' : 'no-cameras');
-          overlay.remove();
-        }
-      }, 200);
+      // Leave the overlay up briefly so the user can read the log even after
+      // entering AR (some Quest builds composite the 2D page during XR).
+      setTimeout(() => overlay.remove(), 4000);
     },
   });
 });

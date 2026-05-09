@@ -2,52 +2,93 @@ import type { World } from '@iwsdk/core';
 
 const SESSION_MODE: XRSessionMode = 'immersive-ar';
 
-const REQUIRED: string[] = [];
-const OPTIONAL: string[] = [
-  'local-floor',
-  'bounded-floor',
-  'hand-tracking',
-  'layers',
-  'camera-access',
+// Try the most aggressive form first: camera-access REQUIRED. If Quest
+// implements it the session boots and `view.camera` populates. If it doesn't,
+// the session won't start and we fall back to a less-strict request that
+// just enters AR (still purple cape but at least the user is in the world).
+const VARIANTS: { required: string[]; optional: string[] }[] = [
+  {
+    required: ['camera-access'],
+    optional: [
+      'local-floor',
+      'bounded-floor',
+      'hand-tracking',
+      'layers',
+    ],
+  },
+  {
+    required: [],
+    optional: [
+      'local-floor',
+      'bounded-floor',
+      'hand-tracking',
+      'layers',
+      'camera-access',
+    ],
+  },
+  {
+    required: [],
+    optional: ['local-floor', 'bounded-floor', 'hand-tracking', 'layers'],
+  },
 ];
 
+export type SessionLogger = (msg: string) => void;
+
 /**
- * Start an immersive-AR session ourselves so we can include 'camera-access'
- * in the optionalFeatures list. IWSDK 0.3.1's structured XRFeatureOptions
- * doesn't expose camera-access, so we bypass its offer flow and feed the
- * resulting session directly into the renderer.
+ * Start an immersive-AR session. Tries multiple feature combinations from
+ * strictest (camera-access required) to most permissive — the first one Quest
+ * accepts wins. Logs everything to the supplied logger so we can see which
+ * variant succeeded and what enabledFeatures the runtime ended up giving us.
  *
  * Pair this with `xr: { offer: 'none' }` in WorldOptions so IWSDK doesn't
  * race us with its own offerSession call.
  */
-export async function offerSessionWithCameraAccess(world: World): Promise<void> {
+export async function offerSessionWithCameraAccess(
+  world: World,
+  log: SessionLogger = () => {},
+): Promise<void> {
   if (!('xr' in navigator) || !navigator.xr) {
-    console.warn('[WorldTear] WebXR not available in this browser.');
+    log('WebXR not available in this browser.');
     return;
   }
 
-  const init: XRSessionInit = {
-    requiredFeatures: REQUIRED,
-    optionalFeatures: OPTIONAL,
-  };
+  for (let i = 0; i < VARIANTS.length; i++) {
+    const v = VARIANTS[i];
+    log(
+      `XR variant ${i}: required=[${v.required.join(',')}] optional=[${v.optional.join(',')}]`,
+    );
+    const init: XRSessionInit = {
+      requiredFeatures: v.required,
+      optionalFeatures: v.optional,
+    };
 
-  const start = async () => {
-    if (world.session) return;
     let session: XRSession | undefined;
     try {
-      const offered = await (navigator.xr as any).offerSession?.(
+      const offered = await (navigator.xr as any).requestSession?.(
         SESSION_MODE,
         init,
       );
       session = offered as XRSession | undefined;
-    } catch (err) {
-      console.warn('[WorldTear] offerSession failed:', err);
+    } catch (err: any) {
+      log(`  requestSession rejected: ${err?.name || ''} ${err?.message || err}`);
+      continue;
     }
-    if (!session) return;
-    await attach(world, session, start);
-  };
 
-  await start();
+    if (!session) {
+      log('  requestSession returned no session');
+      continue;
+    }
+
+    log(
+      `  session started. enabledFeatures=${JSON.stringify((session as any).enabledFeatures ?? null)}`,
+    );
+    await attach(world, session, async () => {
+      log('session ended; reload page to re-enter.');
+    });
+    return;
+  }
+
+  log('all XR variants failed.');
 }
 
 async function attach(world: World, session: XRSession, restart: () => Promise<void>) {
