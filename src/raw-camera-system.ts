@@ -75,9 +75,13 @@ export class RawCameraSystem extends createSystem({}) {
       if (!this.boundOnMaterial[eye]) {
         setCameraTexture(this.cape, eye, wrapper);
         this.boundOnMaterial[eye] = true;
+        this.onBound?.(eye);
       }
     }
   }
+
+  /** Hook fired the first frame view.camera resolves and a texture is bound. */
+  onBound: ((eye: Eye) => void) | null = null;
 
   private createBinding(session: XRSession) {
     try {

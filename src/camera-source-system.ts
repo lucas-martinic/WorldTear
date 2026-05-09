@@ -46,9 +46,13 @@ export class CameraSourceBindSystem extends createSystem({
       if (!tex) continue;
       setCameraTexture(this.cape, eye, tex);
       this.bound[eye] = true;
+      this.onBound?.(eye);
       console.log(`[WorldTear] bound getUserMedia camera to ${eye} eye`);
     }
   }
+
+  /** Hook fired the first frame either eye successfully binds a texture. */
+  onBound: ((eye: Eye) => void) | null = null;
 }
 
 /**

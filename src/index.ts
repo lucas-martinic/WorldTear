@@ -6,20 +6,16 @@ import {
 } from './camera-source-system.js';
 import { ClothSystem, makeFingertipSource } from './cloth-system.js';
 import { RawCameraSystem } from './raw-camera-system.js';
+import { createStatusLight } from './status-light.js';
 import { offerSessionWithCameraAccess } from './xr-session.js';
 
 World.create(document.getElementById('scene-container') as HTMLDivElement, {
   xr: {
     sessionMode: SessionMode.ImmersiveAR,
-    // We start the session ourselves so we can include 'camera-access' in
-    // optionalFeatures (IWSDK 0.3.1 doesn't expose it through XRFeatureOptions).
     offer: 'none',
     features: { handTracking: true },
   },
   features: {
-    // Enable IWSDK's CameraSystem so getUserMedia-based CameraSource entities
-    // can run as a fallback when the W3C 'camera-access' feature isn't
-    // granted by the runtime.
     camera: true,
   },
   render: {
@@ -30,20 +26,59 @@ World.create(document.getElementById('scene-container') as HTMLDivElement, {
   const cape = createCape({ width: 1.0, height: 1.4, cols: 24, rows: 32 });
   cape.mesh.position.set(0, 1.4, -0.9);
   bindStereoEyeSwitching(cape);
-
   world.createTransformEntity(cape.mesh, { parent: world.sceneEntity });
+
+  const status = createStatusLight();
+  status.object.position.set(0.65, 1.4, -0.9);
+  world.createTransformEntity(status.object, { parent: world.sceneEntity });
+  status.set('init');
 
   const rawCam = world
     .registerSystem(RawCameraSystem)
     .getSystem(RawCameraSystem);
-  if (rawCam) rawCam.attach(cape);
+  if (rawCam) {
+    rawCam.attach(cape);
+    rawCam.onBound = () => status.set('rawcam');
+  }
 
-  const pairing = await pickStereoCameras().catch((err) => {
-    console.warn('[WorldTear] camera enumeration failed:', err);
-    return null;
-  });
+  const indexLeft = world.input?.xrOrigin.indexTipSpaces.left;
+  const indexRight = world.input?.xrOrigin.indexTipSpaces.right;
+  const clothSystem = world.registerSystem(ClothSystem).getSystem(ClothSystem);
+  if (clothSystem) {
+    clothSystem.attach(cape, [
+      makeFingertipSource(indexLeft),
+      makeFingertipSource(indexRight),
+    ]);
+  }
 
-  if (pairing) {
+  const cameraBind = world
+    .registerSystem(CameraSourceBindSystem)
+    .getSystem(CameraSourceBindSystem);
+  if (cameraBind) {
+    cameraBind.attach(cape, { left: '', right: '' });
+    cameraBind.onBound = () => status.set('active');
+  }
+
+  status.set('await-xr');
+  await offerSessionWithCameraAccess(world);
+
+  // Wait until we're actually inside the XR session before asking for cameras.
+  // On Quest browser the passthrough cameras may only enumerate inside an
+  // active immersive session.
+  await waitForSession(world);
+
+  status.set('enumerating');
+  try {
+    const pairing = await pickStereoCameras();
+    if (!pairing) {
+      status.set('no-cameras');
+      return;
+    }
+
+    if (cameraBind) {
+      cameraBind.attach(cape, pairing);
+    }
+
     world.createEntity().addComponent(CameraSource, {
       deviceId: pairing.left,
       facing: CameraFacing.Back,
@@ -62,25 +97,23 @@ World.create(document.getElementById('scene-container') as HTMLDivElement, {
       });
     }
 
-    const cameraBind = world
-      .registerSystem(CameraSourceBindSystem)
-      .getSystem(CameraSourceBindSystem);
-    if (cameraBind) cameraBind.attach(cape, pairing);
-  } else {
-    console.warn(
-      '[WorldTear] no cameras enumerable; cape will use fallback color.',
-    );
+    status.set('requested');
+  } catch (err) {
+    console.warn('[WorldTear] camera setup failed:', err);
+    status.set('error');
   }
-
-  const indexLeft = world.input?.xrOrigin.indexTipSpaces.left;
-  const indexRight = world.input?.xrOrigin.indexTipSpaces.right;
-  const clothSystem = world.registerSystem(ClothSystem).getSystem(ClothSystem);
-  if (clothSystem) {
-    clothSystem.attach(cape, [
-      makeFingertipSource(indexLeft),
-      makeFingertipSource(indexRight),
-    ]);
-  }
-
-  await offerSessionWithCameraAccess(world);
 });
+
+function waitForSession(world: World): Promise<void> {
+  return new Promise((resolve) => {
+    if (world.session) {
+      resolve();
+      return;
+    }
+    const tick = () => {
+      if (world.session) resolve();
+      else setTimeout(tick, 100);
+    };
+    tick();
+  });
+}
